@@ -1,0 +1,478 @@
+{
+  "name": "AI Lead Scoring & Routing",
+  "nodes": [
+    {
+      "parameters": {
+        "path": "lead-form-webhook",
+        "responseMode": "onReceived",
+        "responseData": "allEntries",
+        "options": {}
+      },
+      "id": "webhook-trigger",
+      "name": "📥 Webhook (Form Data)",
+      "type": "n8n-nodes-base.webhookTrigger",
+      "typeVersion": 1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// دریافت داده ورودی\nconst item = $input.first().json;\n\n// مقدار پیش‌فرض اعتبار\nlet isValid = true;\nlet errorMessages = [];\n\n// بررسی فیلدهای اجباری\nconst requiredFields = ['fullName', 'email', 'message'];\nfor (const field of requiredFields) {\n  if (!item[field] || item[field].trim() === '') {\n    isValid = false;\n    errorMessages.push(`فیلد ${field} اجباری است.`);\n  }\n}\n\n// نرمال‌سازی\nconst normalizedEmail = item.email ? item.email.toLowerCase().trim() : '';\nconst normalizedName = item.fullName ? item.fullName.trim() : '';\nconst normalizedMessage = item.message ? item.message.trim() : '';\n\n// تشخیص ایمیل شرکتی (لیست ساده دامنه‌های عمومی)\nconst publicDomains = ['gmail.com', 'yahoo.com', 'hotmail.com', 'outlook.com', 'aol.com'];\nlet isCompanyEmail = true;\nif (normalizedEmail) {\n  const domain = normalizedEmail.split('@')[1];\n  if (publicDomains.includes(domain)) {\n    isCompanyEmail = false;\n  }\n} else {\n  isCompanyEmail = false;\n}\n\n// طول پیام\nconst messageLength = normalizedMessage.length;\n\n// خروجی\nreturn [{\n  json: {\n    ...item,\n    fullName: normalizedName,\n    email: normalizedEmail,\n    message: normalizedMessage,\n    isValid: isValid,\n    errorMessages: errorMessages,\n    isCompanyEmail: isCompanyEmail,\n    messageLength: messageLength,\n    receivedAt: new Date().toISOString()\n  }\n}];"
+      },
+      "id": "validation-enrichment",
+      "name": "🔍 Validation & Enrichment",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [450, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true
+          },
+          "conditions": [
+            {
+              "id": "is-valid-check",
+              "leftValue": "={{ $json[\"isValid\"] }}",
+              "rightValue": "=true",
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ]
+        }
+      },
+      "id": "if-valid",
+      "name": "🔀 Is Data Valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [650, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ثبت خطا در شیت گوگل (می‌توانید اینجا درخواست HTTP به Google Sheets بزنید)\n// اما برای سادگی، فقط خطا را در خروجی لاگ می‌کنیم\nconst item = $input.first().json;\nconsole.error('Invalid lead data:', item);\n\n// ارسال پاسخ خطا به وب‌هوک\nreturn [{\n  json: {\n    status: 'error',\n    message: 'داده‌های فرم ناقص است.',\n    errors: item.errorMessages\n  }\n}];"
+      },
+      "id": "error-handler",
+      "name": "⚠️ Log Error & Respond",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [850, 150]
+    },
+    {
+      "parameters": {
+        "jsCode": "// آماده‌سازی داده برای هوش مصنوعی\nconst item = $input.first().json;\n\n// ساخت پرامپت\nconst prompt = `\nبه عنوان یک دستیار امتیازدهی لید فروش عمل کن.\nپیام زیر را از مشتری تحلیل کن و یک امتیاز ۰ تا ۱۰۰ بده.\nامتیاز بالا به معنی پتانسیل بالای خرید است.\nهمچنین intent (هدف) مشتری را مشخص کن (مقادیر ممکن: فروش, پشتیبانی, عمومی).\nدر نهایت یک خلاصه کوتاه از نیاز مشتری بنویس.\n\nاطلاعات مشتری:\nنام: ${item.fullName}\nایمیل: ${item.email}\nپیام: ${item.message}\n\nخروجی را به صورت JSON با کلیدهای score, intent, summary برگردان.\n`;\n\nreturn [{\n  json: {\n    ...item,\n    aiPrompt: prompt\n  }\n}];"
+      },
+      "id": "prepare-ai-prompt",
+      "name": "🤖 Prepare AI Prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [850, 300]
+    },
+    {
+      "parameters": {
+        "resource": "chat",
+        "model": "gpt-4",
+        "chatMessages": {
+          "values": [
+            {
+              "role": "user",
+              "content": "={{ $json.aiPrompt }}"
+            }
+          ]
+        },
+        "options": {
+          "responseFormat": "json_object"
+        }
+      },
+      "id": "openai-scoring",
+      "name": "🧠 OpenAI Scoring",
+      "type": "n8n-nodes-base.openAi",
+      "typeVersion": 1,
+      "position": [1050, 300],
+      "credentials": {
+        "openAiApi": "YOUR_OPENAI_CREDENTIALS_NAME"
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// پارس کردن خروجی JSON از OpenAI\nconst item = $input.first().json;\nlet aiResult;\ntry {\n  aiResult = JSON.parse(item.message.content);\n} catch (e) {\n  // در صورت خطا، مقادیر پیش‌فرض ایمن\n  aiResult = { score: 0, intent: 'عمومی', summary: 'خطا در تحلیل خودکار' };\n}\n\n// اطمینان از محدوده score\nlet score = parseInt(aiResult.score);\nif (isNaN(score) || score < 0) score = 0;\nif (score > 100) score = 100;\n\n// ترکیب با داده‌های قبلی\nreturn [{\n  json: {\n    ...item,\n    aiScore: score,\n    aiIntent: aiResult.intent || 'عمومی',\n    aiSummary: aiResult.summary || ''\n  }\n}];"
+      },
+      "id": "parse-ai-result",
+      "name": "🔧 Parse AI Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [1250, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true
+          },
+          "conditions": [
+            {
+              "id": "score-high",
+              "leftValue": "={{ $json.aiScore }}",
+              "rightValue": "=80",
+              "operator": {
+                "type": "number",
+                "operation": "largerEqual"
+              }
+            }
+          ]
+        }
+      },
+      "id": "if-high-score",
+      "name": "🔀 Score >= 80?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1450, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true
+          },
+          "conditions": [
+            {
+              "id": "score-medium",
+              "leftValue": "={{ $json.aiScore }}",
+              "rightValue": "=40",
+              "operator": {
+                "type": "number",
+                "operation": "largerEqual"
+              }
+            }
+          ]
+        }
+      },
+      "id": "if-medium-score",
+      "name": "🔀 Score 40-79?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1650, 400]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.hubapi.com/crm/v3/objects/deals",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "properties",
+              "value": "={ \"dealname\": {{ $json.fullName }} - {{ $json.aiIntent }}, \"amount\": null, \"pipeline\": \"default\", \"dealstage\": \"appointmentscheduled\", \"hs_lead_status\": \"NEW\", \"hs_object_source\": \"INTEGRATION\", \"description\": {{ $json.aiSummary }} }"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "hubspot-create",
+      "name": "🏢 HubSpot Create Deal",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [1650, 150],
+      "credentials": {
+        "httpHeaderAuth": "YOUR_HUBSPOT_API_KEY"
+      }
+    },
+    {
+      "parameters": {
+        "channel": "webhook",
+        "webhookUri": "YOUR_SLACK_WEBHOOK_URL",
+        "text": "🔔 *لید جدید با امتیاز بالا*\n*نام:* {{ $json.fullName }}\n*ایمیل:* {{ $json.email }}\n*امتیاز:* {{ $json.aiScore }}\n*هدف:* {{ $json.aiIntent }}\n*خلاصه:* {{ $json.aiSummary }}"
+      },
+      "id": "slack-notify",
+      "name": "💬 Slack Notification",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 1,
+      "position": [1850, 150]
+    },
+    {
+      "parameters": {
+        "sheetId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_SHEET_ID",
+          "mode": "id"
+        },
+        "dataMode": "define",
+        "values": {
+          "string": [
+            {
+              "name": "fullName",
+              "value": "={{ $json.fullName }}"
+            },
+            {
+              "name": "email",
+              "value": "={{ $json.email }}"
+            },
+            {
+              "name": "message",
+              "value": "={{ $json.message }}"
+            },
+            {
+              "name": "aiScore",
+              "value": "={{ $json.aiScore }}"
+            },
+            {
+              "name": "aiIntent",
+              "value": "={{ $json.aiIntent }}"
+            },
+            {
+              "name": "aiSummary",
+              "value": "={{ $json.aiSummary }}"
+            },
+            {
+              "name": "receivedAt",
+              "value": "={{ $json.receivedAt }}"
+            }
+          ]
+        }
+      },
+      "id": "google-sheets-medium",
+      "name": "📊 Google Sheets (Medium)",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 3,
+      "position": [1850, 400]
+    },
+    {
+      "parameters": {
+        "message": {
+          "to": "={{ $json.email }}",
+          "subject": "پیگیری درخواست شما",
+          "html": "<p>{{ $json.fullName }} عزیز،</p><p>با تشکر از پیام شما. تیم ما در حال بررسی درخواست شماست و به زودی با شما تماس خواهد گرفت.</p><p>با احترام،<br>تیم فروش</p>"
+        },
+        "operation": "draft"
+      },
+      "id": "gmail-draft",
+      "name": "✉️ Gmail Create Draft",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 1,
+      "position": [2050, 400],
+      "credentials": {
+        "gmailOAuth2": "YOUR_GMAIL_CREDENTIALS"
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// بایگانی لیدهای کم‌امتیاز (می‌توانید در دیتابیس یا شیت جداگانه ذخیره کنید)\nconst item = $input.first().json;\nconsole.log('Low-score lead archived:', item.email);\nreturn [{\n  json: {\n    ...item,\n    archived: true\n  }\n}];"
+      },
+      "id": "archive-low",
+      "name": "📦 Archive Low Score",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 1,
+      "position": [1850, 600]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true
+          },
+          "conditions": [
+            {
+              "id": "always-true",
+              "leftValue": "=1",
+              "rightValue": "=1",
+              "operator": {
+                "type": "number",
+                "operation": "equals"
+              }
+            }
+          ]
+        }
+      },
+      "id": "noop-fallback",
+      "name": "➡️ Fallback (End)",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [2050, 600]
+    }
+  ],
+  "connections": {
+    "📥 Webhook (Form Data)": {
+      "main": [
+        [
+          {
+            "node": "🔍 Validation & Enrichment",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "🔍 Validation & Enrichment": {
+      "main": [
+        [
+          {
+            "node": "🔀 Is Data Valid?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "🔀 Is Data Valid?": {
+      "main": [
+        [
+          {
+            "node": "🤖 Prepare AI Prompt",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "⚠️ Log Error & Respond",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "🤖 Prepare AI Prompt": {
+      "main": [
+        [
+          {
+            "node": "🧠 OpenAI Scoring",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "🧠 OpenAI Scoring": {
+      "main": [
+        [
+          {
+            "node": "🔧 Parse AI Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "🔧 Parse AI Result": {
+      "main": [
+        [
+          {
+            "node": "🔀 Score >= 80?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "🔀 Score >= 80?": {
+      "main": [
+        [
+          {
+            "node": "🏢 HubSpot Create Deal",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "🔀 Score 40-79?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "🔀 Score 40-79?": {
+      "main": [
+        [
+          {
+            "node": "📊 Google Sheets (Medium)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "📦 Archive Low Score",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "🏢 HubSpot Create Deal": {
+      "main": [
+        [
+          {
+            "node": "💬 Slack Notification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "💬 Slack Notification": {
+      "main": [
+        [
+          {
+            "node": "➡️ Fallback (End)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "📊 Google Sheets (Medium)": {
+      "main": [
+        [
+          {
+            "node": "✉️ Gmail Create Draft",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "✉️ Gmail Create Draft": {
+      "main": [
+        [
+          {
+            "node": "➡️ Fallback (End)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "📦 Archive Low Score": {
+      "main": [
+        [
+          {
+            "node": "➡️ Fallback (End)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "pinData": {},
+  "versionId": "1.0.0",
+  "triggerCount": 1
+}
